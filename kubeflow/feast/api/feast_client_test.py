@@ -190,9 +190,14 @@ def test_list_data_sources(client, mock_feast_store):
 
 def test_apply(client, mock_feast_store):
     """Test apply method."""
+    # Test with no objects
     client.apply()
+    mock_feast_store.apply.assert_called_with([])
 
-    mock_feast_store.apply.assert_called_once_with([])
+    # Test with objects
+    mock_objects = [MagicMock(), MagicMock()]
+    client.apply(objects=mock_objects)
+    mock_feast_store.apply.assert_called_with(mock_objects)
 
 
 def test_materialize(client, mock_feast_store):

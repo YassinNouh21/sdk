@@ -103,13 +103,19 @@ class FeastClient:
         )
         return result.to_dict()
 
-    def apply(self) -> None:
+    def apply(self, objects: list[Any] | None = None) -> None:
         """Apply changes to the feature store.
 
-        This method deploys all feature definitions to the feature store,
+        This method deploys feature definitions to the feature store,
         including feature views, entities, and data sources.
+
+        Args:
+            objects: List of Feast objects (Feature Views, Entities, Data Sources) to apply.
+                    If None or empty list, applies all objects defined in the repository.
         """
-        self._store.apply([])
+        if objects is None:
+            objects = []
+        self._store.apply(objects)
 
     def materialize(
         self,
