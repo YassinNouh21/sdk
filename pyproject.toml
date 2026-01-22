@@ -42,6 +42,9 @@ podman = [
 hub = [
   "model-registry>=0.3.0",
 ]
+feast = [
+  "feast>=0.59.0",
+]
 
 [dependency-groups]
 dev = [
