@@ -156,6 +156,38 @@ for version in client.list_model_versions("my-model"):
     print(f"Version: {version.name}")
 ```
 
+### Manage features with Feast
+
+**Install Feast support:**
+```bash
+pip install 'kubeflow[feast]'
+```
+
+Feast is a feature store that enables offline retrieval of historical datasets and online serving of features/data for ML applications.
+
+```python
+from kubeflow.feast import FeastClient
+
+# Initialize the Feast client with your feature repository path
+client = FeastClient(repo_path="/path/to/feast/repo")
+
+# Get online features for real-time inference
+online_features = client.get_online_features(
+    features=["feature_view:feature1", "feature_view:feature2"],
+    entity_rows=[{"entity_id": 1}, {"entity_id": 2}],
+)
+
+# Materialize features to the online store
+from datetime import datetime, timedelta
+end_date = datetime.now()
+start_date = end_date - timedelta(days=7)
+client.materialize(start_date=start_date, end_date=end_date)
+
+# List all feature views
+for fv in client.list_feature_views():
+    print(f"Feature view: {fv.name}")
+```
+
 ## Local Development
 
 Kubeflow Trainer client supports local development without needing a Kubernetes cluster.
@@ -186,6 +218,7 @@ job_id = client.train(trainer=CustomTrainer(func=train_fn))
 | **Kubeflow Trainer**        | ✅ **Available** | v2.0.0+         | Train and fine-tune AI models with various frameworks                 |
 | **Kubeflow Katib**          | ✅ **Available** | v0.19.0+        | Hyperparameter optimization                                           |
 | **Kubeflow Model Registry** | ✅ **Available** | v0.3.0+         | Manage model artifacts, versions and ML artifacts metadata            |
+| **Feast**                   | ✅ **Available** | v0.59.0+        | Feature store for offline and online feature serving                  |
 | **Kubeflow Pipelines**      | 🚧 Planned       | TBD             | Build, run, and track AI workflows                                    |
 | **Kubeflow Spark Operator** | 🚧 Planned       | TBD             | Manage Spark applications for data processing and feature engineering |
 
