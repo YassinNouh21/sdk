@@ -16,10 +16,10 @@
 
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+import tempfile
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -250,9 +250,9 @@ def test_feast_integration_with_local_setup():
     pytest.importorskip("feast")
     pandas = pytest.importorskip("pandas")
 
-    from feast import Entity, FeatureView, Field, FileSource
     from feast.types import Float32, Int64
 
+    from feast import Entity, FeatureView, Field, FileSource
     from kubeflow.feast.api.feast_client import FeastClient
 
     with tempfile.TemporaryDirectory() as temp_dir:

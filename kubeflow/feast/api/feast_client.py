@@ -131,7 +131,9 @@ class FeastClient:
             feature_views=feature_views,
         )
 
-    def materialize_incremental(self, end_date: Any, feature_views: list[str] | None = None) -> None:
+    def materialize_incremental(
+        self, end_date: Any, feature_views: list[str] | None = None
+    ) -> None:
         """Materialize features incrementally into the online store.
 
         This method materializes features from the last materialized state up to end_date.
