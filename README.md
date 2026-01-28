@@ -165,14 +165,16 @@ pip install 'kubeflow[feast]'
 
 Feast is a feature store that enables offline retrieval of historical datasets and online serving of features/data for ML applications.
 
+The FeastClient provides simplified initialization. Access full Feast functionality through the `feature_store` property:
+
 ```python
 from kubeflow.feast import FeastClient
 
 # Initialize the Feast client with your feature repository path
 client = FeastClient(repo_path="/path/to/feast/repo")
 
-# Get online features for real-time inference
-online_features = client.get_online_features(
+# Access full Feast functionality through feature_store property
+online_features = client.feature_store.get_online_features(
     features=["feature_view:feature1", "feature_view:feature2"],
     entity_rows=[{"entity_id": 1}, {"entity_id": 2}],
 )
@@ -181,10 +183,10 @@ online_features = client.get_online_features(
 from datetime import datetime, timedelta
 end_date = datetime.now()
 start_date = end_date - timedelta(days=7)
-client.materialize(start_date=start_date, end_date=end_date)
+client.feature_store.materialize(start_date=start_date, end_date=end_date)
 
 # List all feature views
-for fv in client.list_feature_views():
+for fv in client.feature_store.list_feature_views():
     print(f"Feature view: {fv.name}")
 ```
 

@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 import tempfile
 from unittest.mock import MagicMock
@@ -34,12 +34,8 @@ def skip_if_no_feast():
 
 @pytest.fixture
 def mock_feast_store():
-    """Create a mock FeatureStore with all methods we wrap."""
+    """Create a mock FeatureStore."""
     store = MagicMock()
-    # Set up return values for list methods to be iterable
-    store.list_feature_views.return_value = []
-    store.list_entities.return_value = []
-    store.list_data_sources.return_value = []
     return store
 
 
@@ -125,116 +121,23 @@ def test_init(test_case, monkeypatch):
 
         assert test_case.expected_status == SUCCESS
         mock_feast_store_class.assert_called_once()
-        assert client._store == mock_feast_store_instance
+        assert client._feature_store == mock_feast_store_instance
     except Exception as e:
         assert test_case.expected_status == FAILED
         if hasattr(test_case, "expected_error"):
             assert isinstance(e, test_case.expected_error)
 
 
-def test_get_online_features(client, mock_feast_store):
-    """Test get_online_features method."""
-    # Setup mock return value
-    mock_result = MagicMock()
-    mock_result.to_dict.return_value = {
-        "feature1": [1, 2, 3],
-        "feature2": ["a", "b", "c"],
-    }
-    mock_feast_store.get_online_features.return_value = mock_result
-
-    features = ["feature_view:feature1", "feature_view:feature2"]
-    entity_rows = [{"entity_id": 1}, {"entity_id": 2}, {"entity_id": 3}]
-
-    result = client.get_online_features(features=features, entity_rows=entity_rows)
-
-    mock_feast_store.get_online_features.assert_called_once_with(
-        features=features,
-        entity_rows=entity_rows,
-        full_feature_names=False,
-    )
-    assert result == {"feature1": [1, 2, 3], "feature2": ["a", "b", "c"]}
-
-
-def test_list_feature_views(client, mock_feast_store):
-    """Test list_feature_views method."""
-    mock_feature_views = [MagicMock(name="fv1"), MagicMock(name="fv2")]
-    mock_feast_store.list_feature_views.return_value = mock_feature_views
-
-    result = client.list_feature_views()
-
-    mock_feast_store.list_feature_views.assert_called_once()
-    assert result == mock_feature_views
-
-
-def test_list_entities(client, mock_feast_store):
-    """Test list_entities method."""
-    mock_entities = [MagicMock(name="entity1"), MagicMock(name="entity2")]
-    mock_feast_store.list_entities.return_value = mock_entities
-
-    result = client.list_entities()
-
-    mock_feast_store.list_entities.assert_called_once()
-    assert result == mock_entities
-
-
-def test_list_data_sources(client, mock_feast_store):
-    """Test list_data_sources method."""
-    mock_data_sources = [MagicMock(name="ds1"), MagicMock(name="ds2")]
-    mock_feast_store.list_data_sources.return_value = mock_data_sources
-
-    result = client.list_data_sources()
-
-    mock_feast_store.list_data_sources.assert_called_once()
-    assert result == mock_data_sources
-
-
-def test_apply(client, mock_feast_store):
-    """Test apply method."""
-    # Test with no objects
-    client.apply()
-    mock_feast_store.apply.assert_called_with([])
-
-    # Test with objects
-    mock_objects = [MagicMock(), MagicMock()]
-    client.apply(objects=mock_objects)
-    mock_feast_store.apply.assert_called_with(mock_objects)
-
-
-def test_materialize(client, mock_feast_store):
-    """Test materialize method."""
-    start_date = datetime.now() - timedelta(days=7)
-    end_date = datetime.now()
-
-    client.materialize(start_date=start_date, end_date=end_date)
-
-    mock_feast_store.materialize.assert_called_once_with(
-        start_date=start_date,
-        end_date=end_date,
-        feature_views=None,
-    )
-
-
-def test_materialize_incremental(client, mock_feast_store):
-    """Test materialize_incremental method."""
-    end_date = datetime.now()
-
-    client.materialize_incremental(end_date=end_date)
-
-    mock_feast_store.materialize_incremental.assert_called_once_with(
-        end_date=end_date,
-        feature_views=None,
-    )
-
-
-def test_store_property(client, mock_feast_store):
-    """Test store property."""
-    assert client.store == mock_feast_store
+def test_feature_store_property(client, mock_feast_store):
+    """Test feature_store property provides access to underlying FeatureStore."""
+    assert client.feature_store == mock_feast_store
 
 
 def test_feast_integration_with_local_setup():
     """Test Feast with a simple local setup.
 
-    This test creates a minimal Feast feature store and validates basic operations.
+    This test creates a minimal Feast feature store and validates basic operations
+    through the feature_store property.
     """
     pytest.importorskip("feast")
     pandas = pytest.importorskip("pandas")
@@ -303,30 +206,29 @@ online_store:
         # Initialize client
         client = FeastClient(repo_path=str(repo_path))
 
-        # Write feature definitions to store
-        store = client.store
-        store.apply([driver, driver_stats_source, driver_stats_fv])
+        # Use feature_store property to access full Feast functionality
+        client.feature_store.apply([driver, driver_stats_source, driver_stats_fv])
 
         # Verify feature views
-        feature_views = client.list_feature_views()
+        feature_views = client.feature_store.list_feature_views()
         assert len(feature_views) == 1
         assert feature_views[0].name == "driver_stats"
 
         # Verify entities
-        entities = client.list_entities()
+        entities = client.feature_store.list_entities()
         assert len(entities) == 1
         assert entities[0].name == "driver"
 
         # Test online features retrieval after materialization
         start_date = datetime(2024, 1, 1, 0, 0, 0)
         end_date = datetime(2024, 1, 2, 0, 0, 0)
-        client.materialize(start_date=start_date, end_date=end_date)
+        client.feature_store.materialize(start_date=start_date, end_date=end_date)
 
-        # Get online features
-        online_features = client.get_online_features(
+        # Get online features using feature_store
+        online_features = client.feature_store.get_online_features(
             features=["driver_stats:trips_today", "driver_stats:rating"],
             entity_rows=[{"driver_id": 1001}, {"driver_id": 1002}],
-        )
+        ).to_dict()
 
         assert "trips_today" in online_features
         assert "rating" in online_features

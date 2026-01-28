@@ -17,8 +17,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import pandas as pd
-
     from feast import FeatureStore
 
 
@@ -28,10 +26,24 @@ class FeastClient:
     Feast is a feature store that enables offline retrieval of historical datasets
     and online serving of features/data for ML applications.
 
+    This is a minimal wrapper that provides simplified initialization. For full Feast
+    functionality, use the `feature_store` property to access the underlying FeatureStore.
+
     Requires the feast package to be installed. Install it with:
 
         pip install 'kubeflow[feast]'
 
+    Example:
+        ```python
+        from kubeflow.feast import FeastClient
+
+        # Initialize client
+        client = FeastClient(repo_path="/path/to/feast/repo")
+
+        # Access full Feast functionality
+        client.feature_store.get_online_features(...)
+        client.feature_store.materialize(...)
+        ```
     """
 
     def __init__(self, repo_path: str | None = None, config: dict[str, Any] | None = None):
@@ -54,135 +66,36 @@ class FeastClient:
             ) from e
 
         if config is not None:
-            self._store: FeatureStore = FeatureStore(config=config)
+            self._feature_store: FeatureStore = FeatureStore(config=config)
         else:
-            self._store: FeatureStore = FeatureStore(repo_path=repo_path)
-
-    def get_historical_features(
-        self,
-        entity_df: pd.DataFrame,
-        features: list[str],
-        full_feature_names: bool = False,
-    ) -> pd.DataFrame:
-        """Retrieve historical features for training datasets.
-
-        Args:
-            entity_df: DataFrame with entity keys and timestamps.
-            features: List of feature references in the format "feature_view:feature_name".
-            full_feature_names: Whether to use full feature names in the output DataFrame.
-
-        Returns:
-            DataFrame with historical feature values joined to the entity_df.
-        """
-        return self._store.get_historical_features(
-            entity_df=entity_df,
-            features=features,
-            full_feature_names=full_feature_names,
-        ).to_df()
-
-    def get_online_features(
-        self,
-        features: list[str],
-        entity_rows: list[dict[str, Any]],
-        full_feature_names: bool = False,
-    ) -> dict[str, list[Any]]:
-        """Retrieve online features for real-time inference.
-
-        Args:
-            features: List of feature references in the format "feature_view:feature_name".
-            entity_rows: List of entity dictionaries with entity keys.
-            full_feature_names: Whether to use full feature names in the output.
-
-        Returns:
-            Dictionary mapping feature names to lists of feature values.
-        """
-        result = self._store.get_online_features(
-            features=features,
-            entity_rows=entity_rows,
-            full_feature_names=full_feature_names,
-        )
-        return result.to_dict()
-
-    def apply(self, objects: list[Any] | None = None) -> None:
-        """Apply changes to the feature store.
-
-        This method deploys feature definitions to the feature store,
-        including feature views, entities, and data sources.
-
-        Args:
-            objects: List of Feast objects (Feature Views, Entities, Data Sources) to apply.
-                    If None or empty list, applies all objects defined in the repository.
-        """
-        if objects is None:
-            objects = []
-        self._store.apply(objects)
-
-    def materialize(
-        self,
-        start_date: Any,
-        end_date: Any,
-        feature_views: list[str] | None = None,
-    ) -> None:
-        """Materialize features into the online store.
-
-        Args:
-            start_date: Start date for materialization (datetime or string).
-            end_date: End date for materialization (datetime or string).
-            feature_views: Optional list of feature view names to materialize.
-                          If None, all feature views are materialized.
-        """
-        self._store.materialize(
-            start_date=start_date,
-            end_date=end_date,
-            feature_views=feature_views,
-        )
-
-    def materialize_incremental(
-        self, end_date: Any, feature_views: list[str] | None = None
-    ) -> None:
-        """Materialize features incrementally into the online store.
-
-        This method materializes features from the last materialized state up to end_date.
-
-        Args:
-            end_date: End date for materialization (datetime or string).
-            feature_views: Optional list of feature view names to materialize.
-                          If None, all feature views are materialized.
-        """
-        self._store.materialize_incremental(
-            end_date=end_date,
-            feature_views=feature_views,
-        )
-
-    def list_feature_views(self) -> list[Any]:
-        """List all feature views in the feature store.
-
-        Returns:
-            List of feature view objects.
-        """
-        return self._store.list_feature_views()
-
-    def list_entities(self) -> list[Any]:
-        """List all entities in the feature store.
-
-        Returns:
-            List of entity objects.
-        """
-        return self._store.list_entities()
-
-    def list_data_sources(self) -> list[Any]:
-        """List all data sources in the feature store.
-
-        Returns:
-            List of data source objects.
-        """
-        return self._store.list_data_sources()
+            self._feature_store: FeatureStore = FeatureStore(repo_path=repo_path)
 
     @property
-    def store(self) -> FeatureStore:
+    def feature_store(self) -> FeatureStore:
         """Access the underlying Feast FeatureStore instance.
+
+        Use this property to access the full Feast API for operations like:
+        - get_online_features() / get_historical_features()
+        - materialize() / materialize_incremental()
+        - apply() - Deploy feature definitions
+        - list_feature_views() / list_entities() / list_data_sources()
 
         Returns:
             The Feast FeatureStore instance.
+
+        Example:
+            ```python
+            client = FeastClient(repo_path="/path/to/feast/repo")
+
+            # Get online features
+            features = client.feature_store.get_online_features(
+                features=["feature_view:feature1"],
+                entity_rows=[{"entity_id": 1}],
+            )
+
+            # List feature views
+            for fv in client.feature_store.list_feature_views():
+                print(fv.name)
+            ```
         """
-        return self._store
+        return self._feature_store
