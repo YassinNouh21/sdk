@@ -807,7 +807,8 @@ arranged.
 #### SDK API
 
 `ConfigTrainer` gains one class attribute and one concrete method. `get_config()` remains the
-only abstraction a subclass must supply.
+only abstraction a subclass must supply. `to_args()` renders the trainer's own fields and
+takes no other input, keeping the trainer types free of backend concepts.
 
 ```python
 # kubeflow/trainer/types/types.py
@@ -818,27 +819,19 @@ class ConfigTrainer(BaseTrainer):
 
     command: ClassVar[tuple[str, ...]] = ()
 
-    def to_args(self, initializer: Optional["Initializer"] = None) -> list[str]:
+    def to_args(self) -> list[str]:
         """Render the config as entrypoint arguments.
 
         The default renders each entry of ``get_config()`` as a flat
-        ``key=value`` override. Frameworks whose CLI uses a different convention
-        override this method; TorchTune's overrides are nested
-        (``model.lora_rank=...``), so `TorchTuneTrainer` overrides it too and
-        delegates to the existing emitter.
-
-        Args:
-            initializer: The job's initializer, when the framework's arguments
-                depend on where the dataset or model was staged.
+        ``key=value`` override. Frameworks whose CLI uses a different
+        convention override this method.
         """
         return [f"{key}={value}" for key, value in self.get_config().items()]
 ```
 
-The framework label is resolved through a registry rather than a constant, which is also the
-extension path for frameworks outside the SDK tree. It maps a framework label value to a
-`ConfigTrainer` subclass and serves exactly one lookup — the one `get_runtime_trainer()`
-performs. It is not an execution backend: a trainer the user has already constructed is
-dispatched polymorphically, with no lookup.
+The framework label is resolved through a registry rather than a constant. It maps a label to
+a `ConfigTrainer` subclass and serves exactly one lookup — the one `get_runtime_trainer()`
+performs — and is the extension path for out-of-tree frameworks.
 
 ```python
 # kubeflow/trainer/types/registry.py
@@ -908,9 +901,9 @@ class TorchTuneTrainer(ConfigTrainer):
     def get_config(self) -> dict:
         return asdict(self.config)
 
-    def to_args(self, initializer: Optional["Initializer"] = None) -> list[str]:
+    def to_args(self) -> list[str]:
         """Preserve the existing TorchTune override rendering exactly."""
-        return torchtune.get_args_using_torchtune_config(self.config, initializer)
+        return torchtune.get_args_using_torchtune_config(self.config)
 ```
 
 ```python
@@ -921,7 +914,7 @@ from enum import Enum
 from typing import ClassVar, Optional
 
 from kubeflow.trainer.types.registry import register_config_trainer
-from kubeflow.trainer.types.types import BaseTrainer, ConfigTrainer, Initializer
+from kubeflow.trainer.types.types import BaseTrainer, ConfigTrainer
 
 
 class TRLMethod(Enum):
@@ -1001,7 +994,7 @@ class TRLTrainer(ConfigTrainer):
             if f.name not in excluded and getattr(self, f.name) is not None
         }
 
-    def to_args(self, initializer: Optional["Initializer"] = None) -> list[str]:
+    def to_args(self) -> list[str]:
         """Render as `[<subcommand>, --flag, value, ...]` for the TRL CLI."""
         args: list[str] = [self.method.value]
         for key, value in self.get_config().items():
@@ -1018,75 +1011,60 @@ class TRLTrainer(ConfigTrainer):
 
 **Design decisions:**
 
-- **Framework is a class; post-training method is a field.** The hierarchy places a
-  distinction in a subclass only when it changes *behavior*; a distinction that changes only
-  *data* stays a field. Frameworks differ in behavior — TRL renders `--learning_rate 2e-5`
-  for the `trl` CLI where TorchTune renders nested `model.lora_rank=8` overrides for
-  `tune run`, and each carries its own `command` — so each framework is a thin class. TRL's
-  methods differ only in which fields apply, so `method` is an enum guarded by
-  `_METHOD_SCOPED_FIELDS`, not a `TRLSFTTrainer` / `TRLDPOTrainer` sibling set. The asymmetry
-  is deliberate: an exported class name is frozen public API, an enum member is not, and
-  methods are the volatile axis (TRL adds and relocates them release to release). Supporting
-  KTO is one enum member and one `_METHOD_SCOPED_FIELDS` entry in `trl.py` — no new export,
-  no backend change, no hierarchy move. Alternatives
+- **Framework is a class; post-training method is a field.** A distinction becomes a subclass
+  when it changes behavior, and stays a field when it changes only data. Frameworks differ in
+  behavior — TRL renders `--learning_rate 2e-5`, TorchTune renders nested `model.lora_rank=8`,
+  and each has its own `command` — so each is a thin class. TRL's methods differ only in which
+  fields apply, so `method` is an enum guarded by `_METHOD_SCOPED_FIELDS`. Adding `kto` is one
+  enum member and one entry in `trl.py`; no new export, no backend change. Alternatives
   [7](#7-one-trainer-class-per-post-training-method-sfttrainer-dpotrainer-grpotrainer) and
-  [8](#8-a-single-generic-config-driven-trainer-instead-of-framework-subclasses) examine the
-  two rejected poles.
-- **`command` is a `ClassVar` on the trainer, not a constant in `constants.py`.** The
-  entrypoint of a config-driven job is a property of the framework's CLI (`("tune", "run")`,
-  `("trl",)`), and the trainer class is the only place that knows it. This retires the
-  `if framework == types.TORCH_TUNE` entrypoint chain at `utils.py:140-148` for the
-  config-driven path, and deletes `constants.TORCH_TUNE_COMMAND` (`constants.py:179`), whose
-  only consumer is that branch. The `FuncTrainer` path is untouched.
+  [8](#8-a-single-generic-config-driven-trainer-instead-of-framework-subclasses) are the
+  rejected poles.
+- **`command` is a `ClassVar` on the trainer, not a constant in `constants.py`.** The entrypoint
+  is a property of the framework's CLI, and the trainer class is the only place that knows it.
+  This retires the `if framework == types.TORCH_TUNE` chain at `utils.py:140-148` for the
+  config-driven path and deletes `constants.TORCH_TUNE_COMMAND`, whose only consumer is that
+  branch. The `FuncTrainer` path is untouched.
 - **`trainer_type` is derived from the registry.** `get_runtime_trainer()` assigns
-  `BUILTIN_TRAINER` when the runtime's framework label is claimed by a registered
-  `ConfigTrainer` subclass and `CUSTOM_TRAINER` otherwise, replacing `utils.py:114-119` and
-  deleting the reflection-derived `types.TORCH_TUNE` constant. No new runtime label,
-  annotation or CRD field is introduced: `trainer.kubeflow.org/framework` remains the sole
-  discovery key, honoring [Non-Goal #2](#non-goals).
-- **`to_args()` takes the initializer.** The TorchTune emitter derives `dataset.data_files=` /
-  `dataset.data_dir=` from the Hugging Face dataset initializer (`utils.py:502-517`). A
-  rendering method that could not see the initializer would silently lose that behavior.
-  `TRLTrainer` does not use it: `model_name_or_path` and `dataset_name` are passed through
-  verbatim for the `trl` CLI to resolve, so pairing `TRLTrainer` with a Hugging Face
-  initializer stages artifacts the CLI does not read. Redirecting them depends on the `trl`
-  runtime image's entrypoint contract, which this proposal does not specify.
+  `BUILTIN_TRAINER` when the framework label is claimed by a registered `ConfigTrainer` and
+  `CUSTOM_TRAINER` otherwise, replacing `utils.py:114-119` and deleting the reflection-derived
+  `types.TORCH_TUNE` constant. `trainer.kubeflow.org/framework` remains the sole discovery key,
+  honoring [Non-Goal #2](#non-goals).
+- **`to_args()` renders only the trainer's own fields.** It takes no initializer: the trainer
+  types are plain dataclasses today and stay that way, so nothing in `types.py` needs to know
+  how a backend stages data. The one behavior that does depend on staging — TorchTune's
+  `dataset.data_files=` / `dataset.data_dir=` override, derived from the Hugging Face dataset
+  initializer (`utils.py:502-517`) — stays in the backend, where it already lives, and is
+  appended to whatever the trainer renders. `TRLTrainer` needs nothing from the initializer:
+  `model_name_or_path` and `dataset_name` are passed through for the `trl` CLI to resolve.
 - **`TorchTuneTrainer.to_args()` delegates to the existing emitter.** `get_args_from_peft_config`
-  (`utils.py:530-559`) maps `LoraConfig` fields onto nested `model.*` keys; a flat `key=value`
-  walk would emit `lora_rank=8` instead of `model.lora_rank=8` and produce a job that fails.
-  The three emitters (`utils.py:473-601`) move verbatim to `kubeflow/trainer/types/torchtune.py`
-  — they contain no Kubernetes-specific logic, and leaving them in the backend would make
-  `types.py` import a backend module, a cycle.
-- **Rendering moves to the trainer,** which amends [Backend Integration](#backend-integration):
-  the `ConfigTrainer` branch of `_build_trainer_cr` becomes
-  `trainer_cr.args = trainer.to_args(initializer)`. This is a one-time backend change, and it
-  is what makes adding a *further* trainer require no backend changes at all.
-- **Registration runs at import time and is last-writer-wins.** `TorchTuneTrainer` lives in
-  `types.py`, which the backend already imports. `TRLTrainer` lives in a new module, so it
-  must be exported from `kubeflow/trainer/__init__.py`; without that, a process that never
-  imports it finds no claimant for the `trl` label and treats the runtime as function-driven.
-  An out-of-tree trainer claiming an in-tree label shadows it — the ambient entry-point
-  convention, and what lets a community fork replace a stalled in-tree trainer without an
-  upstream commit.
-- **The whole hierarchy is `@dataclass(kw_only=True)`,** which amends the bare `@dataclass`
-  shown in sections A–C. `BaseTrainer` declares `num_nodes`, `resources_per_node` and `image`
-  with defaults, so without `kw_only` no subclass could declare a non-defaulted field:
-  `FuncTrainer.func` and `TorchTuneTrainer.config` would both raise `TypeError: non-default
-  argument follows default argument` at class-definition time. `CustomTrainer`,
-  `BuiltinTrainer` and `TorchTuneConfig` keep their bare declarations — their construction
-  signatures are public API and do not change.
-- **`LoraConfig` is not reused for TRL.** `LoraConfig` (`types.py:152-187`) is TorchTune-shaped:
-  `apply_lora_to_output` and `quantize_base` have no TRL analogue, and TRL's PEFT surface is
-  `--use_peft` / `--lora_r` / `--lora_alpha` / `--lora_target_modules`. Sharing the type across
-  two frameworks with non-overlapping semantics would need a lossy translation layer.
+  (`utils.py:530-559`) maps `LoraConfig` onto nested `model.*` keys; a flat `key=value` walk
+  would emit `lora_rank=8` instead of `model.lora_rank=8` and produce a failing job. The
+  emitters move verbatim to `kubeflow/trainer/types/torchtune.py` — they hold no Kubernetes
+  logic, and leaving them in the backend would make `types.py` import a backend module.
+- **Rendering moves to the trainer,** amending [Backend Integration](#backend-integration): the
+  `ConfigTrainer` branch of `_build_trainer_cr` becomes `trainer_cr.args = trainer.to_args()`.
+  A one-time backend change that makes adding a further trainer require none.
+- **Registration runs at import time and is last-writer-wins.** `TRLTrainer` lives in a new
+  module, so it must be exported from `kubeflow/trainer/__init__.py`; otherwise a process that
+  never imports it finds no claimant for the `trl` label and treats the runtime as
+  function-driven. An out-of-tree trainer claiming an in-tree label shadows it, which lets a
+  fork replace a stalled in-tree trainer without an upstream commit.
+- **The whole hierarchy is `@dataclass(kw_only=True)`,** amending the bare `@dataclass` in
+  sections A–C. `BaseTrainer` declares `num_nodes`, `resources_per_node` and `image` with
+  defaults, so without `kw_only` no subclass could declare a non-defaulted field —
+  `FuncTrainer.func` and `TorchTuneTrainer.config` would raise `TypeError` at class-definition
+  time. `CustomTrainer`, `BuiltinTrainer` and `TorchTuneConfig` keep their bare declarations:
+  their construction signatures are public API.
+- **`LoraConfig` is not reused for TRL.** It is TorchTune-shaped — `apply_lora_to_output` and
+  `quantize_base` have no TRL analogue, and TRL's PEFT surface is `--use_peft` / `--lora_r` /
+  `--lora_alpha` / `--lora_target_modules`. Sharing it would need a lossy translation layer.
 - **Unsloth is a runtime-image concern, not a sibling class.** An Unsloth-accelerated image is
-  still labelled `trainer.kubeflow.org/framework: trl`, so it is discovered by the same
-  registry entry, validated by the unmodified `TRLTrainer` and selected with `train(runtime=...)`.
-  No SDK field is added.
-- **`BuiltinTrainer` is unchanged in Alpha.** `BuiltinTrainer(config=TorchTuneConfig(...))`
-  keeps working and produces byte-identical `TrainJob` arguments; it gains a `FutureWarning`
-  pointing at `TorchTuneTrainer` in Beta and is formally deprecated at GA, on the schedule
-  already stated in [Migration and Backward Compatibility](#migration-and-backward-compatibility).
+  still labelled `trainer.kubeflow.org/framework: trl`, so it is found by the same registry
+  entry and selected with `train(runtime=...)`. No SDK field is added.
+- **`BuiltinTrainer` is unchanged in Alpha.** It keeps working and produces byte-identical
+  `TrainJob` arguments; it gains a `FutureWarning` in Beta and is deprecated at GA, on the
+  schedule in [Migration and Backward Compatibility](#migration-and-backward-compatibility).
 
 #### Which Framework, and Why TRL
 
@@ -1099,20 +1077,17 @@ class TRLTrainer(ConfigTrainer):
 | Unsloth | None of its own; an acceleration layer | Active | No independent CLI |
 
 TRL is selected on three grounds. Its stable CLI covers the methods the SDK cannot express at
-all today: preference optimization (DPO) and group-relative policy optimization (GRPO). It is
-the substrate rather than a wrapper — LlamaFactory and Axolotl are both built on the Hugging
-Face `Trainer` and PEFT — so an in-tree TRL trainer adds capability where an in-tree wrapper
-would add a second surface over the same engine. And its CLI takes flags, so it renders into
-`TrainJob` `command` and `args` with no adapter and no YAML recipe to materialize into the
-container; a file-first CLI (`axolotl train <config.yaml>`) would need a ConfigMap or a volume.
+all today — DPO and GRPO. It is the substrate rather than a wrapper: LlamaFactory and Axolotl
+are both built on the Hugging Face `Trainer` and PEFT, so an in-tree TRL trainer adds
+capability where an in-tree wrapper would add a second surface over the same engine. And its
+CLI takes flags, so it renders into `TrainJob` `command` and `args` with no adapter; a
+file-first CLI (`axolotl train <config.yaml>`) would need a ConfigMap or a volume.
 
 Choosing TRL first forecloses nothing: every alternative reaches the SDK out of tree through
 the registry above, which is why LlamaFactory is the reference out-of-tree plugin.
 
-**TRL fits the existing Kubeflow Trainer pattern.** A framework is supportable when it is a
-CLI, because a runtime is an image plus a `command` the SDK appends arguments to. TorchTune
-already works this way, and TRL is the same shape — `trl sft --flag value` where TorchTune has
-`tune run <recipe> key=value`. Nothing new is asked of the control plane.
+TRL also fits the runtime pattern the Trainer already uses. A runtime is an image plus a
+`command` the SDK appends arguments to, so a framework is supportable when it is a CLI:
 
 ```yaml
 # manifests/base/runtimes/torchtune/llama3_2/llama3_2_1B.yaml — today
@@ -1121,32 +1096,18 @@ metadata:
   labels:
     trainer.kubeflow.org/framework: torchtune   # the SDK's discovery key
 spec: {...containers: [{image: ghcr.io/kubeflow/trainer/torchtune-trainer,
-                        command: [tune, run, ...]}]}
+                        command: [tune, run, ...]}]}   # TRL: [trl]
 ```
 
-```yaml
-# the TRL equivalent — same structure, new label and command
-kind: ClusterTrainingRuntime
-metadata:
-  labels:
-    trainer.kubeflow.org/framework: trl
-spec: {...containers: [{image: ghcr.io/kubeflow/trainer/trl-trainer,
-                        command: [trl]}]}       # TRLTrainer.command
-```
+The cost is two artifacts in `kubeflow/trainer`, mirroring what TorchTune already has:
+`cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`, and a runtime
+manifest under `manifests/base/runtimes/trl/`. Both are outside this proposal's scope, and
+neither needs a control-plane change.
 
-The cost is two artifacts in the `kubeflow/trainer` repository, mirroring what TorchTune
-already has — `cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`, and
-a runtime manifest under `manifests/base/runtimes/trl/`. Both are outside this SDK proposal's
-scope, and neither requires a control-plane change: the SDK writes `.spec.trainer.args`, the
-runtime supplies the `command`, and the TRL CLI consumes them exactly as `tune run` does.
-
-**Risk:** TRL's surface is not frozen. PPO's relocation to `trl.experimental` shows that
-trainers migrate between the stable and experimental namespaces across minor releases, and a
-typed dataclass mirroring TRL flags will drift. Three properties bound the damage.
-`TRLTrainer` targets the CLI rather than the Python API and re-implements no TRL semantics, so
-a TRL upgrade changes the runtime image rather than the SDK type. It exposes only `TRLMethod`
-members on the stable CLI, and widening coverage to `kto`, `reward` or `rloo` is an enum member
-plus fields. And the registry confines a framework's churn to its own trainer class.
+**Risk:** TRL's surface is not frozen — PPO moved to `trl.experimental` in a minor release, and
+a typed dataclass mirroring TRL flags will drift. `TRLTrainer` targets the CLI rather than the
+Python API, so a TRL upgrade changes the runtime image rather than the SDK type, and the
+registry confines a framework's churn to its own class.
 
 ---
 ## Design Details
