@@ -44,6 +44,9 @@ Directory: docs/proposals/285-specialized-trainers/README.md
     - [E. TrainerClient Changes](#e-trainerclient-changes)
     - [F. Config-Driven LLM Trainers](#f-config-driven-llm-trainers)
       - [SDK API](#sdk-api)
+      - [Dynamic Registration](#dynamic-registration)
+      - [TorchTuneTrainer and TRLTrainer](#torchtunetrainer-and-trltrainer)
+      - [Control Plane](#control-plane)
       - [Which Framework, and Why TRL](#which-framework-and-why-trl)
   - [Design Details](#design-details)
     - [Runtime Auto-Discovery](#runtime-auto-discovery)
@@ -829,6 +832,8 @@ class ConfigTrainer(BaseTrainer):
         return [f"{key}={value}" for key, value in self.get_config().items()]
 ```
 
+#### Dynamic Registration
+
 The framework label is resolved through a registry rather than a constant. It maps a label to
 a `ConfigTrainer` subclass and serves exactly one lookup — the one `get_runtime_trainer()`
 performs — and is the extension path for out-of-tree frameworks.
@@ -836,48 +841,33 @@ performs — and is the extension path for out-of-tree frameworks.
 ```python
 # kubeflow/trainer/types/registry.py
 
-from importlib.metadata import entry_points
 from typing import Optional
 
 _CONFIG_TRAINERS: dict[str, type["ConfigTrainer"]] = {}
-_discovered = False
 
 
 def register_config_trainer(cls: type["ConfigTrainer"]) -> type["ConfigTrainer"]:
     """Claim the framework labels declared in `cls.supported_frameworks`."""
-    if not cls.supported_frameworks:
-        raise ValueError(f"{cls.__name__} must declare supported_frameworks")
-    if not cls.command:
-        raise ValueError(f"{cls.__name__} must declare a command")
+    if not (cls.supported_frameworks and cls.command):
+        raise ValueError(f"{cls.__name__} must declare supported_frameworks and a command")
     for framework in cls.supported_frameworks:
         _CONFIG_TRAINERS[framework] = cls
     return cls
 
 
 def get_config_trainer(framework: str) -> Optional[type["ConfigTrainer"]]:
-    """Return the ConfigTrainer claiming this framework label, or None.
-
-    Third-party trainers are discovered lazily, on the first lookup that misses
-    the in-tree registrations.
-    """
-    # Imported inside the function: `types.py` imports `register_config_trainer`
-    # from this module, so a module-scope import here would be a cycle.
-    from kubeflow.trainer.types.types import ConfigTrainer
-
-    global _discovered
-    if framework not in _CONFIG_TRAINERS and not _discovered:
-        _discovered = True
-        for entry_point in entry_points(group="kubeflow.trainer.config_trainers"):
-            candidate = entry_point.load()
-            if not (isinstance(candidate, type) and issubclass(candidate, ConfigTrainer)):
-                raise ValueError(
-                    f"Entry point '{entry_point.name}' in group "
-                    f"'kubeflow.trainer.config_trainers' must resolve to a "
-                    f"ConfigTrainer subclass, got {candidate!r}"
-                )
-            register_config_trainer(candidate)
+    """Return the ConfigTrainer claiming this framework label, or None."""
     return _CONFIG_TRAINERS.get(framework)
 ```
+
+Registration is an explicit decorator because that is how this ecosystem already registers
+plugins: the Trainer control plane lists every framework plugin by hand in
+`pkg/runtime/framework/plugins/registry.go`, KEP-2839 sketched this exact shape
+(`@register_backend`), and kubeflow/sdk#310 is its PoC. There is no entry-point or
+import-hook discovery: an out-of-tree trainer must be imported before it can be
+constructed, and importing it registers it, so the decorator is sufficient.
+
+#### TorchTuneTrainer and TRLTrainer
 
 ```python
 # kubeflow/trainer/types/types.py
@@ -1066,6 +1056,28 @@ class TRLTrainer(ConfigTrainer):
   `TrainJob` arguments; it gains a `FutureWarning` in Beta and is deprecated at GA, on the
   schedule in [Migration and Backward Compatibility](#migration-and-backward-compatibility).
 
+#### Control Plane
+
+This section changes nothing in the control plane: no Trainer controller, `TrainJob` CRD, or
+`ClusterTrainingRuntime` CRD change. A runtime is an image plus a `command` the SDK appends
+arguments to, so a framework is supportable when it is a CLI:
+
+```yaml
+# manifests/base/runtimes/torchtune/llama3_2/llama3_2_1B.yaml — today
+kind: ClusterTrainingRuntime
+metadata:
+  labels:
+    trainer.kubeflow.org/framework: torchtune   # the SDK's discovery key
+spec: {...containers: [{image: ghcr.io/kubeflow/trainer/torchtune-trainer,
+                        command: [tune, run, ...]}]}   # TRL: [trl]
+```
+
+Per framework, the cost is two artifacts in `kubeflow/trainer`, mirroring what TorchTune
+already has: a `cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`,
+and a runtime manifest under `manifests/base/runtimes/trl/`. Both are outside this proposal's
+scope; the SDK's only contract with them is the framework label and the `command` it appends
+`to_args()` onto.
+
 #### Which Framework, and Why TRL
 
 | Framework | Post-training methods | Maintenance | Entrypoint |
@@ -1085,24 +1097,6 @@ file-first CLI (`axolotl train <config.yaml>`) would need a ConfigMap or a volum
 
 Choosing TRL first forecloses nothing: every alternative reaches the SDK out of tree through
 the registry above, which is why LlamaFactory is the reference out-of-tree plugin.
-
-TRL also fits the runtime pattern the Trainer already uses. A runtime is an image plus a
-`command` the SDK appends arguments to, so a framework is supportable when it is a CLI:
-
-```yaml
-# manifests/base/runtimes/torchtune/llama3_2/llama3_2_1B.yaml — today
-kind: ClusterTrainingRuntime
-metadata:
-  labels:
-    trainer.kubeflow.org/framework: torchtune   # the SDK's discovery key
-spec: {...containers: [{image: ghcr.io/kubeflow/trainer/torchtune-trainer,
-                        command: [tune, run, ...]}]}   # TRL: [trl]
-```
-
-The cost is two artifacts in `kubeflow/trainer`, mirroring what TorchTune already has:
-`cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`, and a runtime
-manifest under `manifests/base/runtimes/trl/`. Both are outside this proposal's scope, and
-neither needs a control-plane change.
 
 **Risk:** TRL's surface is not frozen — PPO moved to `trl.experimental` in a minor release, and
 a typed dataclass mirroring TRL flags will drift. `TRLTrainer` targets the CLI rather than the
