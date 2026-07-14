@@ -73,6 +73,8 @@ Directory: docs/proposals/285-specialized-trainers/README.md
     - [4. Automatic runtime selection with scoring/ranking instead of strict single-match](#4-automatic-runtime-selection-with-scoringranking-instead-of-strict-single-match)
     - [5. Flat hierarchy: all trainers inherit directly from BaseTrainer](#5-flat-hierarchy-all-trainers-inherit-directly-from-basetrainer)
     - [6. Have specialized trainers inherit from CustomTrainer](#6-have-specialized-trainers-inherit-from-customtrainer)
+    - [7. One trainer class per post-training method (SFTTrainer, DPOTrainer, GRPOTrainer)](#7-one-trainer-class-per-post-training-method-sfttrainer-dpotrainer-grpotrainer)
+    - [8. A single generic config-driven trainer instead of framework subclasses](#8-a-single-generic-config-driven-trainer-instead-of-framework-subclasses)
   - [References](#references)
 <!-- /toc -->
 
@@ -1016,6 +1018,20 @@ class TRLTrainer(ConfigTrainer):
 
 **Design decisions:**
 
+- **Framework is a class; post-training method is a field.** The hierarchy places a
+  distinction in a subclass only when it changes *behavior*; a distinction that changes only
+  *data* stays a field. Frameworks differ in behavior — TRL renders `--learning_rate 2e-5`
+  for the `trl` CLI where TorchTune renders nested `model.lora_rank=8` overrides for
+  `tune run`, and each carries its own `command` — so each framework is a thin class. TRL's
+  methods differ only in which fields apply, so `method` is an enum guarded by
+  `_METHOD_SCOPED_FIELDS`, not a `TRLSFTTrainer` / `TRLDPOTrainer` sibling set. The asymmetry
+  is deliberate: an exported class name is frozen public API, an enum member is not, and
+  methods are the volatile axis (TRL adds and relocates them release to release). Supporting
+  KTO is one enum member and one `_METHOD_SCOPED_FIELDS` entry in `trl.py` — no new export,
+  no backend change, no hierarchy move. Alternatives
+  [7](#7-one-trainer-class-per-post-training-method-sfttrainer-dpotrainer-grpotrainer) and
+  [8](#8-a-single-generic-config-driven-trainer-instead-of-framework-subclasses) examine the
+  two rejected poles.
 - **`command` is a `ClassVar` on the trainer, not a constant in `constants.py`.** The
   entrypoint of a config-driven job is a property of the framework's CLI (`("tune", "run")`,
   `("trl",)`), and the trainer class is the only place that knows it. This retires the
@@ -1714,6 +1730,39 @@ hierarchy.
   in `RuntimeConfig`).
 - Inheriting from `CustomTrainer` would force specialized trainers to carry fields
   that violate the separation of concerns this proposal aims to achieve.
+
+### 7. One trainer class per post-training method (`SFTTrainer`, `DPOTrainer`, `GRPOTrainer`)
+
+Structure the hierarchy by method rather than by framework, mirroring TRL's own Python
+class names.
+
+**Rejected because:**
+- The method axis changes only data — which fields apply — while rendering (`to_args()`),
+  `command`, and runtime discovery are all per-framework. Once a second framework supports
+  the same method, `SFTTrainer` needs a framework discriminator anyway, reintroducing
+  alternative 8 one level down.
+- Methods are the volatile axis: TRL moved PPO to `trl.experimental` in a minor release.
+  An enum member can be added or deprecated without touching the type hierarchy; an
+  exported class name cannot.
+- The design still captures the method taxonomy — as the `TRLMethod` enum and
+  `_METHOD_SCOPED_FIELDS`, where regrouping is a data change rather than a hierarchy move.
+
+### 8. A single generic config-driven trainer instead of framework subclasses
+
+Keep one concrete class — the existing `BuiltinTrainer(config=...)` — and add one config
+dataclass per framework (`TRLConfig`, ...), discriminated by config type.
+
+**Rejected because:**
+- Frameworks differ in behavior, not just fields: TRL renders `--flag value`, TorchTune
+  renders nested `key=value` overrides, and each has its own entrypoint. A generic class
+  must branch on config type inside `to_args()`, which is coupling #4 (`utils.py:451-452`)
+  relocated, not removed — the `isinstance` ladder section F exists to delete.
+- Attaching rendering and `command` to the config so the wrapper can stay generic turns the
+  config into a class with behavior — the subclass shape with an extra layer of indirection
+  (`BuiltinTrainer(config=TRLConfig(...))` versus `TRLTrainer(...)`) and one more concept
+  for the user to learn.
+- What this shape gets right — keeping volatile taxonomy in data — the design retains where
+  the axis really is data-only: `method` is a field, not a class (alternative 7).
 
 ---
 
