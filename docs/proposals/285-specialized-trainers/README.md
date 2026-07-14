@@ -1093,6 +1093,37 @@ container; a file-first CLI (`axolotl train <config.yaml>`) would need a ConfigM
 Choosing TRL first forecloses nothing: every alternative reaches the SDK out of tree through
 the registry above, which is why LlamaFactory is the reference out-of-tree plugin.
 
+**TRL fits the existing Kubeflow Trainer pattern.** A framework is supportable when it is a
+CLI, because a runtime is an image plus a `command` the SDK appends arguments to. TorchTune
+already works this way, and TRL is the same shape — `trl sft --flag value` where TorchTune has
+`tune run <recipe> key=value`. Nothing new is asked of the control plane.
+
+```yaml
+# manifests/base/runtimes/torchtune/llama3_2/llama3_2_1B.yaml — today
+kind: ClusterTrainingRuntime
+metadata:
+  labels:
+    trainer.kubeflow.org/framework: torchtune   # the SDK's discovery key
+spec: {...containers: [{image: ghcr.io/kubeflow/trainer/torchtune-trainer,
+                        command: [tune, run, ...]}]}
+```
+
+```yaml
+# the TRL equivalent — same structure, new label and command
+kind: ClusterTrainingRuntime
+metadata:
+  labels:
+    trainer.kubeflow.org/framework: trl
+spec: {...containers: [{image: ghcr.io/kubeflow/trainer/trl-trainer,
+                        command: [trl]}]}       # TRLTrainer.command
+```
+
+The cost is two artifacts in the `kubeflow/trainer` repository, mirroring what TorchTune
+already has — `cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`, and
+a runtime manifest under `manifests/base/runtimes/trl/`. Both are outside this SDK proposal's
+scope, and neither requires a control-plane change: the SDK writes `.spec.trainer.args`, the
+runtime supplies the `command`, and the TRL CLI consumes them exactly as `tune run` does.
+
 **Risk:** TRL's surface is not frozen. PPO's relocation to `trl.experimental` shows that
 trainers migrate between the stable and experimental namespaces across minor releases, and a
 typed dataclass mirroring TRL flags will drift. Three properties bound the damage.
