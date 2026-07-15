@@ -812,11 +812,6 @@ argument — it is keyed off `cls.framework`, so there is no name to drift from 
 There is no entry-point or import-hook discovery: an out-of-tree config must be imported
 before it can be constructed, and importing it registers it, so the decorator is sufficient.
 
-This registry is deliberately SDK-side only — it makes a framework *submittable*, while the
-cluster-side runtime remains an admin-curated artifact. Whether "dynamic registration"
-should also cover control-plane provisioning is
-[Open Question #2](#open-questions).
-
 #### TorchTuneConfig
 
 `TorchTuneConfig` keeps every field and its construction signature. It gains the three
@@ -1010,12 +1005,9 @@ TrainerClient().train(
   finds no claimant for the `trl` label and treats the runtime as function-driven. An
   out-of-tree config claiming an in-tree label shadows it, which lets a fork replace a
   stalled in-tree config without an upstream commit.
-- **The base class is named `FrameworkConfig`, not KEP-2839's `LLMBackend`.** KEP-2839
-  ([#3263](https://github.com/kubeflow/trainer/pull/3263)) introduced this interface as
-  `LLMBackend` and sdk#310 prototyped its registry; this proposal supersedes that SDK
-  portion and renames the type, because `backends/` in this SDK means *execution* backend
-  (`KubernetesBackend`, `ContainerBackend`) while this object is the `config=` argument —
-  and nothing in it is LLM-specific. Nothing else in the design changes with the name.
+- **The base class is named `FrameworkConfig`, not KEP-2839's `LLMBackend`.** `backends/`
+  in this SDK means *execution* backend (`KubernetesBackend`, `ContainerBackend`), while
+  this object is the `config=` argument — and nothing in it is LLM-specific.
 - **`LoraConfig` is not reused for TRL.** It is TorchTune-shaped — `apply_lora_to_output` and
   `quantize_base` have no TRL analogue, and TRL's PEFT surface is `--use_peft` / `--lora_r` /
   `--lora_alpha` / `--lora_target_modules`. Sharing it would need a lossy translation layer.
@@ -1572,14 +1564,10 @@ The following design questions should be resolved before or during implementatio
    (a) inspect `runtime.trainer.command`, (b) add a launcher label to runtimes,
    (c) defer validation to the controller.
 
-2. **Does dynamic registration extend to the control plane?** This proposal's registry
-   is SDK-side: registering a `FrameworkConfig` makes a framework *submittable*, but the
-   cluster must already hold a runtime (image + `ClusterTrainingRuntime` manifest) for
-   it. Should "dynamic registration" also cover provisioning that runtime — e.g., the
-   SDK creating a namespaced `TrainingRuntime` from the config's declared image and
-   `mlPolicy` when no labelled runtime exists? This needs alignment with the control
-   plane owners on whether runtimes remain admin-curated artifacts or become
-   SDK-provisionable, and is deferred until that requirement is clarified.
+2. **Does dynamic registration extend to the control plane?** The registry here is
+   SDK-side; the cluster must already hold a labelled runtime (image + manifest).
+   Whether "dynamic registration" should also cover provisioning that runtime needs
+   clarification with the control plane owners, and is deferred until then.
 
 3. **Observability.** When runtime auto-discovery selects a runtime, should the SDK
    log the selected runtime name and framework at `INFO` level? This would aid
@@ -1709,11 +1697,9 @@ site.
 ## References
 
 - [KEP-2170: Kubeflow Trainer V2 API](https://github.com/kubeflow/trainer/blob/master/docs/proposals/2170-kubeflow-trainer-v2/README.md)
-- [KEP-2839: Kubeflow Dynamic LLM Trainer Framework](https://github.com/kubeflow/trainer/issues/2839) — prior art;
-  its proposal PR ([kubeflow/trainer#3263](https://github.com/kubeflow/trainer/pull/3263)) defined the
-  `LLMBackend` interface and `@register_backend` registry that section F adopts (renamed
-  `FrameworkConfig` / `register_framework`). The PR was closed in favor of this work; the
-  [sdk#310 registry PoC](https://github.com/kubeflow/sdk/pull/310) prototyped the pattern.
+- [KEP-2839: Kubeflow Dynamic LLM Trainer Framework](https://github.com/kubeflow/trainer/issues/2839)
+  — prior art superseded by section F ([proposal PR #3263](https://github.com/kubeflow/trainer/pull/3263),
+  [sdk#310 registry PoC](https://github.com/kubeflow/sdk/pull/310))
 - [Kubeflow SDK Repository](https://github.com/kubeflow/sdk)
 - [Kubeflow Trainer Repository](https://github.com/kubeflow/trainer)
 - [Kubeflow Community Proposal Workflow](https://github.com/kubeflow/community/blob/master/proposal-workflow.md)
