@@ -594,14 +594,15 @@ base class and the concrete configs; the trainer side stays one class.
 
 #### BuiltinTrainer
 
-`BuiltinTrainer` is the concrete `ConfigTrainer`. Its public construction signature —
-`BuiltinTrainer(config=...)` — does not change; the `config` field widens from the
-concrete `TorchTuneConfig` to the `FrameworkConfig` base, so a second framework is a new
-config class and no new trainer class:
+`ConfigTrainer` is concrete — new code constructs it directly with any registered config.
+`BuiltinTrainer` stays where it is today, existing and unchanged: its public construction
+signature remains `BuiltinTrainer(config=...)`, and its `config` field widens from the
+concrete `TorchTuneConfig` to the `FrameworkConfig` base. Both entry points accept any
+framework, so a second framework is a new config class and no new trainer class:
 
 ```python
 BuiltinTrainer(config=TorchTuneConfig(...))   # today, still valid
-BuiltinTrainer(config=TRLConfig(...))         # new, same trainer
+ConfigTrainer(config=TRLConfig(...))          # new code, same machinery
 ```
 
 | Aspect | `BuiltinTrainer` (current) | `BuiltinTrainer` (proposed) |
@@ -1023,9 +1024,9 @@ TrainerClient().train(
 
 #### Control Plane
 
-This proposal changes nothing in the control plane: no Trainer controller, `TrainJob` CRD, or
-`ClusterTrainingRuntime` CRD change. A runtime is an image plus a `command` the SDK appends
-arguments to, so a framework is supportable when it is a CLI:
+This proposal requires no `TrainJob` CRD, `ClusterTrainingRuntime` CRD, controller, or
+plugin-registry change. A runtime is an image plus a `command` the SDK appends arguments to,
+so a framework is supportable when it is a CLI:
 
 ```yaml
 # manifests/base/runtimes/torchtune/llama3_2/llama3_2_1B.yaml — today
@@ -1037,11 +1038,15 @@ spec: {...containers: [{image: ghcr.io/kubeflow/trainer/torchtune-trainer,
                         command: [tune, run, ...]}]}   # TRL: [trl]
 ```
 
-Per framework, the cost is two artifacts in `kubeflow/trainer`, mirroring what TorchTune
-already has: a `cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`,
-and a runtime manifest under `manifests/base/runtimes/trl/`. Both are outside this proposal's
-scope; the SDK's only contract with them is the framework label and the `command` it appends
-`to_args()` onto.
+Per framework, the cost is three artifacts in `kubeflow/trainer`, mirroring what TorchTune
+already has: a `cmd/trainers/trl/Dockerfile` alongside `cmd/trainers/torchtune/Dockerfile`, a
+runtime manifest under `manifests/base/runtimes/trl/`, and an extension of the existing torch
+plugin. The runtime declares `mlPolicy: torch`, and the torch plugin dispatches on the
+trainer command — `torch.go:81` matches `constants.TorchTuneEntrypoint` and calls into
+`torchtune.go` for validation and command mutation. TRL follows the same pattern: a `trl.go`
+beside `torchtune.go` and a `TRLEntrypoint` constant, extending the plugin rather than
+creating a new one. All three are outside this proposal's scope; the SDK's only contract with
+them is the framework label and the `command` it appends `to_args()` onto.
 
 #### Which Framework, and Why TRL
 
@@ -1062,6 +1067,10 @@ file-first CLI (`axolotl train <config.yaml>`) would need a ConfigMap or a volum
 
 Choosing TRL first forecloses nothing: every alternative reaches the SDK out of tree as a
 `FrameworkConfig` subclass, which is why LlamaFactory is the reference out-of-tree plugin.
+GRPO-style post-training via TRL is already in flight in the Trainer
+([#3508](https://github.com/kubeflow/trainer/issues/3508),
+[#3718](https://github.com/kubeflow/trainer/pull/3718)); this proposal provides the SDK
+surface for that effort rather than a parallel track.
 
 **Risk:** TRL's surface is not frozen — PPO moved to `trl.experimental` in a minor release, and
 a typed dataclass mirroring TRL flags will drift. `TRLConfig` targets the CLI rather than the
@@ -1292,17 +1301,17 @@ init container, environment variables are set on all training pods.
                               │
               ┌───────────────┴───────────────┐
               │                               │
-        FuncTrainer (ABC)               ConfigTrainer
+        FuncTrainer (ABC)               ConfigTrainer  (concrete)
         ├── func: Callable              ├── config: FrameworkConfig
         ├── func_args: dict             └── supported_frameworks (property
         ├── get_framework_args() [abstr]      -> config.framework)
         ├── get_train_func()
-        └── get_train_func_args()
-              │                               │
-    ┌─────────┼─────────┬──────────┐          │
-    │         │         │          │     BuiltinTrainer
-  Torch   DeepSpeed   JAX    XGBoost   (existing name, unchanged
-  Trainer  Trainer  Trainer  Trainer    signature: config=...)
+        └── get_train_func_args()       users construct it directly:
+              │                         ConfigTrainer(config=TRLConfig(...))
+    ┌─────────┼─────────┬──────────┐
+    │         │         │          │
+  Torch   DeepSpeed   JAX    XGBoost
+  Trainer  Trainer  Trainer  Trainer
               │
     (supports both "deepspeed"
      and "torch" frameworks)
@@ -1324,8 +1333,10 @@ init container, environment variables are set on all training pods.
 
     Existing (unchanged):
 
-    CustomTrainer                     CustomTrainerContainer
-    (flat dataclass, no base class)   (image-based, no base class)
+    BuiltinTrainer                    CustomTrainer                     CustomTrainerContainer
+    (signature unchanged;             (flat dataclass, no base class)   (image-based, no base class)
+     config widens to
+     FrameworkConfig)
 
 
     New:
