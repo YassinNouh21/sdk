@@ -291,7 +291,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Optional, ClassVar
 
-@dataclass
+@dataclass(kw_only=True)
 class BaseTrainer(ABC):
     """Abstract base class for all specialized trainer implementations.
 
@@ -357,6 +357,10 @@ class BaseTrainer(ABC):
   rather than at runtime.
 - Common fields (`num_nodes`, `resources_per_node`, `image`) live on `BaseTrainer` so
   every trainer inherits them without repetition.
+- The new hierarchy is `@dataclass(kw_only=True)`: `BaseTrainer`'s fields have defaults,
+  so without `kw_only` a subclass could not declare a required field — `FuncTrainer.func`
+  would raise `TypeError` at class-definition time. Existing types (`CustomTrainer`,
+  `BuiltinTrainer`) keep their bare declarations; their signatures are public API.
 - `BaseTrainer` declares no argument-rendering method. Each branch renders its own way:
   `FuncTrainer` declares `get_framework_args()` (abstract), and the config-driven path
   renders through the config's `to_args()` ([Section F](#f-config-driven-llm-trainers)).
@@ -373,7 +377,7 @@ function. It owns the `func` and `func_args` fields and implements the correspon
 accessors, so concrete framework trainers only need to add framework-specific fields.
 
 ```python
-@dataclass
+@dataclass(kw_only=True)
 class FuncTrainer(BaseTrainer):
     """Base class for function-driven trainers.
 
@@ -942,8 +946,7 @@ class TRLConfig(FrameworkConfig):
 Users reach both through the trainer they already know:
 
 ```python
-from kubeflow.trainer import BuiltinTrainer, TrainerClient
-from kubeflow.trainer.types.trl import TRLConfig, TRLMethod
+from kubeflow.trainer import BuiltinTrainer, TrainerClient, TRLConfig, TRLMethod
 
 TrainerClient().train(
     trainer=BuiltinTrainer(
