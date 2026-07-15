@@ -1301,7 +1301,7 @@ init container, environment variables are set on all training pods.
                               │
               ┌───────────────┴───────────────┐
               │                               │
-        FuncTrainer (ABC)               ConfigTrainer  (concrete)
+        FuncTrainer (ABC)               ConfigTrainer
         ├── func: Callable              ├── config: FrameworkConfig
         ├── func_args: dict             └── supported_frameworks (property
         ├── get_framework_args() [abstr]      -> config.framework)
