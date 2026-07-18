@@ -1,5 +1,12 @@
 # KEP-285: Config-Driven LLM Trainers
 
+## Authors
+
+- Yassin Nouh - [@YassinNouh21](https://github.com/YassinNouh21)
+
+Builds on [KEP-285: Specialized Trainer Abstractions](https://github.com/kubeflow/sdk/pull/308)
+by Saad Zaher — [@szaher](https://github.com/szaher).
+
 <!-- toc -->
 - [Summary](#summary)
 - [Motivation](#motivation)
@@ -18,11 +25,13 @@
   - [Framework Analysis](#framework-analysis)
 - [Migration and Backward Compatibility](#migration-and-backward-compatibility)
 - [Implementation Phases](#implementation-phases)
+- [Test Plan](#test-plan)
 - [Open Questions](#open-questions)
 - [Alternatives Considered](#alternatives-considered)
   - [1. One trainer class per framework](#1-one-trainer-class-per-framework)
   - [2. One config class per post-training method](#2-one-config-class-per-post-training-method)
   - [3. Entry-point discovery for out-of-tree frameworks](#3-entry-point-discovery-for-out-of-tree-frameworks)
+- [Implementation History](#implementation-history)
 - [References](#references)
 <!-- /toc -->
 
@@ -499,6 +508,20 @@ extension points — see Open Questions.
 - **Phase 3:** further frameworks in or out of tree (LlamaFactory as the reference
   out-of-tree plugin; Axolotl once config staging exists).
 
+## Test Plan
+
+- **Unit tests** (`kubeflow/trainer/**/*_test.py`, no network): `FrameworkConfig` contract
+  (subclass must declare `framework`/`command`, `register_framework` rejects otherwise);
+  `TRLConfig` rendering per method, method-scoped field validation, `extra_args`
+  passthrough; registry lookup and last-writer-wins shadowing; `ConfigTrainer`
+  `validate_runtime` positive/negative; `get_runtime_trainer()` classification with and
+  without a registered framework.
+- **Backward-compatibility tests**: `BuiltinTrainer(config=TorchTuneConfig(...))` produces
+  byte-identical `TrainJob` command/args before and after the change; `CustomTrainer`
+  against a `trl`-labelled runtime keeps working after `TRLConfig` registers.
+- **E2E** (Phase 1): one TRL SFT job submitted through `ConfigTrainer` against a TRL
+  runtime on a kind cluster, asserting the rendered command/args and job completion.
+
 ## Open Questions
 
 1. **Does dynamic registration extend to the control plane?** The registry here is
@@ -537,6 +560,12 @@ packages. Rejected for now: a config must be imported to be constructed, and imp
 registers it, so discovery only fixes a cosmetic listing case — at the cost of import-time
 side effects and non-deterministic registration order. It is purely additive later: an
 entry-point loader can feed the same registry dict without breaking any caller.
+
+## Implementation History
+
+- 2026-02-11: [KEP-285 Specialized Trainer Abstractions](https://github.com/kubeflow/sdk/pull/308) proposed by @szaher
+- 2026-07-15: Scope narrowed to config-driven LLM/RLHF trainers at the SDK community call;
+  this proposal drafted
 
 ## References
 
