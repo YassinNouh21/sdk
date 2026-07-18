@@ -130,7 +130,8 @@ signatures are public API.
 ### ConfigTrainer
 
 One concrete class for all config-driven jobs — jobs where the runtime image owns the
-training loop (`tune run`, `trl`) and the user supplies only parameters.
+training loop (`tune run`, `trl`) and the user supplies only parameters. (`FrameworkConfig`
+is specified in the next section.)
 
 ```python
 @dataclass(kw_only=True)
@@ -246,6 +247,8 @@ only in which fields apply under the same command
 
 ```python
 # kubeflow/trainer/types/trl.py
+# Imports: `from kubeflow.trainer.types.registry import register_framework`,
+# `from kubeflow.trainer.types.types import FrameworkConfig`
 
 class TRLMethod(Enum):
     """Post-training method; the value is the TRL CLI subcommand."""
@@ -282,8 +285,11 @@ class TRLConfig(FrameworkConfig):
 
     beta: Optional[float] = None              # DPO
     max_prompt_length: Optional[int] = None   # DPO
-    reward_funcs: Optional[list[str]] = None  # GRPO
-    num_generations: Optional[int] = None     # GRPO
+    reward_funcs: Optional[list[str]] = None  # GRPO: reward function identifiers,
+    num_generations: Optional[int] = None     # GRPO   passed through to the CLI
+
+    extra_args: Optional[list[str]] = None    # passthrough for CLI flags not modeled
+                                              # above; escape hatch against TRL drift
 
     _METHOD_SCOPED_FIELDS: ClassVar[dict[str, frozenset[str]]] = {
         "beta": frozenset({TRLMethod.DPO.value}),
@@ -305,7 +311,7 @@ class TRLConfig(FrameworkConfig):
         """Render as `[<subcommand>, --flag, value, ...]` for the TRL CLI."""
         args: list[str] = [self.method.value]
         for f in fields(self):
-            if f.name == "method":
+            if f.name in ("method", "extra_args"):
                 continue
             value = getattr(self, f.name)
             if value is None:
@@ -317,8 +323,14 @@ class TRLConfig(FrameworkConfig):
                 args.extend(str(item) for item in value)
             else:
                 args += [f"--{f.name}", str(value)]
+        if self.extra_args:
+            args.extend(self.extra_args)
         return args
 ```
+
+The typed fields cover the common surface; `extra_args` is the deliberate escape hatch so
+the dataclass does not have to chase every flag of every TRL release — argument semantics
+follow the TRL version in the runtime image.
 
 `LoraConfig` is not reused for TRL: it is TorchTune-shaped (`apply_lora_to_output`,
 `quantize_base` have no TRL analogue), and TRL's PEFT surface is `--use_peft` / `--lora_r` /
@@ -328,7 +340,8 @@ with `train(runtime=...)`.
 
 ### TorchTune Transition
 
-`TorchTuneConfig` keeps every field and its construction signature, and gains the three
+`TorchTuneConfig` keeps every field and its construction signature, and gains the
+`@register_framework` decorator (claiming the `torchtune` label) plus the three
 `FrameworkConfig` members (`framework = "torchtune"`, `command = ("tune", "run")`, and a
 `to_args()` that delegates to the existing emitters, which move verbatim from the backend to
 `kubeflow/trainer/types/torchtune.py`). Existing jobs produce byte-identical `TrainJob`
@@ -360,8 +373,11 @@ TrainerClient().train(
 ```
 
 When `runtime` is omitted, the SDK lists runtimes and matches the
-`trainer.kubeflow.org/framework` label against `config.framework`; with a runtime given,
-`validate_runtime()` checks compatibility.
+`trainer.kubeflow.org/framework` label against `config.framework`: exactly one match is
+used; zero or multiple matches raise `ValueError` naming the candidates and asking for an
+explicit `runtime`. With a runtime given, `validate_runtime()` checks compatibility. This
+auto-selection applies only to `ConfigTrainer`; existing trainer types keep today's default
+runtime behavior.
 
 ### Backend Changes
 
@@ -380,7 +396,18 @@ trainer_cr.args = trainer.config.to_args()
 ```
 
 Deleted: the reflection-derived `types.TORCH_TUNE` constant, `constants.TORCH_TUNE_COMMAND`,
-and the `isinstance(trainer.config, TorchTuneConfig)` guard. One behavior stays in the
+and the `isinstance(trainer.config, TorchTuneConfig)` guard.
+
+**Classification is capability, not exclusion.** `BUILTIN_TRAINER` marks a runtime as
+config-driven *capable*; it must not forbid `CustomTrainer`. Today the backend hard-rejects
+`CustomTrainer` against non-CUSTOM runtimes (`backend.py:795`); that check relaxes so
+`CustomTrainer` may target any runtime. This matters concretely: the in-flight GRPO runtime
+([#3718](https://github.com/kubeflow/trainer/pull/3718)) is driven through a custom
+entrypoint script — the `CustomTrainer` pattern — and must keep working unchanged after
+`TRLConfig` registers and reclassifies `trl`-labelled runtimes. For out-of-tree frameworks,
+classification depends on which configs the process has imported; with the relaxation this
+is benign — an unimported framework's runtime lists as `CUSTOM_TRAINER` and remains fully
+usable. One behavior stays in the
 backend: TorchTune's `dataset.data_files=` / `dataset.data_dir=` override is computed from
 the Hugging Face dataset initializer (`utils.py:512-527`) — staging knowledge the backend
 owns — and is appended to whatever `to_args()` renders. `TRLConfig` needs nothing from the
@@ -389,8 +416,8 @@ resolve.
 
 ### Control Plane
 
-This proposal requires no `TrainJob` CRD, `ClusterTrainingRuntime` CRD, controller, or
-plugin-registry change. A runtime is an image plus a `command` the SDK appends arguments to:
+This proposal requires no `TrainJob` or `ClusterTrainingRuntime` CRD change and no new
+controller plugin. A runtime is an image plus a `command` the SDK appends arguments to:
 
 ```yaml
 kind: ClusterTrainingRuntime
@@ -406,14 +433,25 @@ spec:
 Per framework, the cost is three artifacts in `kubeflow/trainer`, mirroring what TorchTune
 already has: a `cmd/trainers/trl/Dockerfile`, a runtime manifest under
 `manifests/base/runtimes/trl/`, and an extension of the existing torch plugin. The torch
-plugin dispatches on the trainer command (`torch.go:81` matches
-`constants.TorchTuneEntrypoint` and calls into `torchtune.go` for validation and command
-mutation); TRL follows the same pattern with a `trl.go` and a `TRLEntrypoint` constant —
-extending the plugin, not creating a new one. All three artifacts are Trainer-repository
-work, coordinated with the in-flight GRPO effort
+plugin dispatches on the trainer command (`torch.go:81` for validation, `torch.go:175` for
+command mutation — both match `constants.TorchTuneEntrypoint` and call into `torchtune.go`);
+TRL follows the same pattern with a `trl.go` and a `TRLEntrypoint` constant — extending the
+plugin, not creating a new one.
+
+**Command ownership** generalizes today's TorchTune flow, in precedence order: the runtime
+manifest carries a default `command`; the SDK overrides it with `config.command` +
+`to_args()` (exactly as it sets `TORCH_TUNE_COMMAND` today, `utils.py:151-158`); and the
+plugin may mutate the final command for distributed wiring, as `torchtune.go` injects the
+rendezvous endpoint. Whether TRL needs equivalent mutation for multi-node — or the injected
+torchrun env alone suffices for its accelerate launcher — is settled by the Phase-1 PoC;
+`trl.go` is the extension point either way.
+
+All three artifacts are Trainer-repository work, coordinated with the in-flight GRPO effort
 ([#3508](https://github.com/kubeflow/trainer/issues/3508),
 [#3718](https://github.com/kubeflow/trainer/pull/3718)), for which this KEP provides the SDK
-surface.
+surface. Note that #3718 currently drives TRL's `GRPOTrainer` through a custom entrypoint
+script rather than the `trl` CLI; converging on one runtime shape is part of that
+consolidation.
 
 ### Framework Analysis
 
@@ -445,7 +483,8 @@ extension points — see Open Questions.
 | `TorchTuneConfig` | Fields and signature unchanged; gains the `FrameworkConfig` ClassVars and `to_args()`. |
 | `CustomTrainer` / `CustomTrainerContainer` | Untouched (out of scope for this phase). |
 | `TrainerClient.train()` | The `trainer` parameter union extends to accept `ConfigTrainer`. |
-| Public exports | Added: `BaseTrainer`, `ConfigTrainer`, `FrameworkConfig`, `TRLConfig`, `TRLMethod`. None removed or renamed. |
+| `trl`-labelled runtimes | Reclassified from `CUSTOM_TRAINER` to `BUILTIN_TRAINER` in `list_runtimes()` once `TRLConfig` registers. `CustomTrainer` remains valid against them — the backend's trainer-type check relaxes (see [Backend Changes](#backend-changes)) — so existing #3718-style flows are unaffected. |
+| Public exports | Added: `BaseTrainer`, `ConfigTrainer`, `FrameworkConfig`, `TRLConfig`, `TRLMethod`, `register_framework`. None removed or renamed. |
 | Python version | `@dataclass(kw_only=True)` needs Python 3.10 — already the SDK's floor (`requires-python = ">=3.10"`). |
 
 ## Implementation Phases
