@@ -323,12 +323,21 @@ class BaseTrainer(ABC):
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
-        if not getattr(cls, "__abstractmethods__", None):
-            if not hasattr(cls, "supported_frameworks") or not cls.supported_frameworks:
-                raise TypeError(
-                    f"{cls.__name__} must define a non-empty "
-                    f"'supported_frameworks' class variable"
-                )
+        # `__abstractmethods__` is a `type` descriptor that does not inherit
+        # through the MRO, and ABCMeta populates it only *after*
+        # `__init_subclass__` runs — so it cannot be used to detect an abstract
+        # subclass here. Skip classes that declare abstract methods of their own,
+        # and let `abc` reject instantiation of anything still abstract.
+        if any(
+            getattr(value, "__isabstractmethod__", False)
+            for value in cls.__dict__.values()
+        ):
+            return
+        if not getattr(cls, "supported_frameworks", None):
+            raise TypeError(
+                f"{cls.__name__} must define a non-empty "
+                f"'supported_frameworks' class variable"
+            )
 
     def validate_runtime(self, runtime: "Runtime") -> None:
         """Validate that the given runtime is compatible with this trainer.
@@ -354,7 +363,13 @@ class BaseTrainer(ABC):
   ordered by preference: the first entry is the preferred framework for auto-discovery.
   `__init_subclass__` enforces that every concrete subclass defines a non-empty
   `supported_frameworks`, catching missing declarations at class definition time
-  rather than at runtime.
+  rather than at runtime. It detects abstract intermediates by inspecting
+  `cls.__dict__` for `__isabstractmethod__` rather than reading
+  `cls.__abstractmethods__`: that attribute is a `type` descriptor which does not
+  inherit through the MRO, and `ABCMeta` populates it only *after*
+  `__init_subclass__` has run, so it is always absent here. Reading it would make
+  the guard fire on `FuncTrainer` and `ConfigTrainer` themselves, which legitimately
+  do not declare `supported_frameworks`.
 - Common fields (`num_nodes`, `resources_per_node`, `image`) live on `BaseTrainer` so
   every trainer inherits them without repetition.
 - The new hierarchy is `@dataclass(kw_only=True)`: `BaseTrainer`'s fields have defaults,
@@ -584,8 +599,15 @@ class ConfigTrainer(BaseTrainer):
 
 `supported_frameworks` is a property here rather than the `ClassVar` that `FuncTrainer`
 subclasses declare, because a config-driven trainer's framework is a property of the
-instance's config. `BaseTrainer.__init_subclass__` is satisfied either way — it checks
-that the attribute exists and is non-empty, and a property object is both.
+instance's config rather than of the class.
+
+This is the one place the property form matters for `__init_subclass__`: the guard reads
+`getattr(cls, "supported_frameworks", None)`, which on `ConfigTrainer` returns the *property
+object* — always truthy — so the check passes without inspecting a framework value. That is
+acceptable because the value it would inspect comes from `cls.config.framework`, and the
+registry already rejects a `FrameworkConfig` that declares no framework (see
+[Dynamic Registration](#dynamic-registration)). The declaration is validated once, where it
+is made, rather than twice.
 
 `ConfigTrainer` is **not** subclassed per framework. A framework is a *config* — the
 existing `BuiltinTrainer(config=TorchTuneConfig(...))` shape, generalized so the config
@@ -978,21 +1000,41 @@ TrainerClient().train(
   is one enum member and one entry in `trl.py`; no new export, no backend change. Alternative
   [7](#7-one-config-class-per-post-training-method-sftconfig-dpoconfig-grpoconfig) covers the
   method-first split.
-- **`command` and `framework` are `ClassVar`s on the config.** The entrypoint and the label
-  are properties of the framework's CLI, and the config is the only object that knows them.
-  This retires the `if framework == types.TORCH_TUNE` chain at `utils.py:140-148` and deletes
-  `constants.TORCH_TUNE_COMMAND`, whose only consumer is that branch. The `FuncTrainer` path is
-  untouched.
+- **`command` and `framework` are `ClassVar`s on the config, but `RuntimeTrainer` still carries
+  the resolved entrypoint.** The config *declares* them — they are properties of the framework's
+  CLI, and the config class is the only object that knows them — while
+  `RuntimeTrainer.command` remains the field every consumer reads. That field is not
+  config-driven-specific: `command[0] == "mpirun"` drives MPI detection (`utils.py:216`,
+  `:378`, `backend.py:242`), `get_runtime_packages` rewrites it to run single-process, and the
+  localprocess backend joins it into an entrypoint (`localprocess/utils.py:229`). Moving it
+  onto the config would mean special-casing all of those. Instead `get_runtime_trainer()`
+  resolves it through the registry, replacing the `framework == types.TORCH_TUNE` branch at
+  `utils.py:150-158` and deleting `constants.TORCH_TUNE_COMMAND`:
+
+  ```python
+  if config_cls := registry.get_framework(framework):
+      trainer.set_command(config_cls.command)
+  elif ml_policy.torch is not None:
+      trainer.set_command(constants.TORCH_COMMAND)
+  elif ml_policy.mpi:
+      trainer.set_command(constants.MPI_COMMAND)
+  else:
+      trainer.set_command(constants.DEFAULT_COMMAND)
+  ```
+
+  This is the same relationship the framework label already has: the runtime CR declares it,
+  `RuntimeTrainer.framework` carries it. Adding a framework adds no lines to `utils.py`, and
+  CR construction stays uniform across both trainer types.
 - **`trainer_type` is derived from the registry.** `get_runtime_trainer()` assigns
   `BUILTIN_TRAINER` when `get_framework(framework)` finds a registered `FrameworkConfig`
   and `CUSTOM_TRAINER` otherwise, replacing `utils.py:114-119` and deleting
   the reflection-derived `types.TORCH_TUNE` constant. `trainer.kubeflow.org/framework` remains
   the sole discovery key, honoring [Non-Goal #2](#non-goals).
 - **Rendering is polymorphic, so the backend has no framework branch.** `_build_trainer_cr`'s
-  config-driven path becomes `trainer_cr.args = trainer.config.to_args()`, deleting the
-  `isinstance(trainer.config, TorchTuneConfig)` guard at `utils.py:451-452` — coupling #4 —
-  rather than relocating it. This is the one-time backend change that makes adding a *further*
-  framework require none.
+  config-driven path changes one line — `trainer_cr.args = trainer.config.to_args()` — deleting
+  the `isinstance(trainer.config, TorchTuneConfig)` guard at `utils.py:451-452` (coupling #4)
+  rather than relocating it. `trainer_cr.command = list(runtime.trainer.command)` is unchanged.
+  This is the one-time backend change that makes adding a *further* framework require none.
 - **TorchTune's initializer-derived dataset override stays in the backend.** The
   `dataset.data_files=` / `dataset.data_dir=` args are computed from the Hugging Face dataset
   initializer (`utils.py:502-517`), which is staging knowledge the backend owns. They are
@@ -1280,9 +1322,9 @@ def _build_trainer_cr(self, runtime, trainer):
             ]
 
     elif isinstance(trainer, ConfigTrainer):
-        # Config-driven: entrypoint and args both come from the config.
-        # No framework branch — to_args() is polymorphic.
-        trainer_cr.command = list(trainer.config.command)
+        # Entrypoint comes from the runtime, exactly as it does today.
+        # Only args change: to_args() is polymorphic, so no framework branch.
+        trainer_cr.command = list(runtime.trainer.command)
         trainer_cr.args = trainer.config.to_args()
 
     return trainer_cr
